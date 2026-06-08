@@ -3059,7 +3059,7 @@ async function codexUsageSnapshot(stateMessage = {}) {
             stopWatchUsageRefreshPromise = null;
           });
       }
-      return cachedStopWatchUsage.value;
+      return await stopWatchUsageRefreshPromise;
     }
 
     const value = await buildCodexUsageSnapshotValue(stateMessage, empty);
@@ -3131,9 +3131,10 @@ async function buildCodexUsageSnapshotValue(stateMessage, empty) {
   const todayUsage = codexBarStyleDailyUsage(todayFiles, todayKey);
   const codexBarUsage = codexBarDailyUsageFromCache(todayKey);
   const logQuota = stopWatchQuotaFromSessionRateLimits(chosen.rateLimits, chosen.timestamp);
-  const usageSource = quota
-    ? quota.source
-    : logQuota?.source || "codex-session-logs";
+  const selectedQuota = selectStopWatchQuota({ quota, logQuota });
+  const usageSource = selectedQuota
+    ? selectedQuota.source
+    : "codex-session-logs";
   return {
     ...empty,
     sessionTokens: codexBarUsage?.sessionTokens ?? tokenUsageTotal(chosen.info?.total_token_usage),
@@ -3142,12 +3143,38 @@ async function buildCodexUsageSnapshotValue(stateMessage, empty) {
     todayCostUSD: codexBarUsage?.costUSD ?? null,
     todayTurns: todayUsage.turns,
     contextWindow: integerOrNull(chosen.info?.model_context_window),
-    ...(quota || logQuota || {}),
+    ...(selectedQuota || {}),
     updatedAt: chosen.timestamp,
     source: codexBarUsage
       ? `${usageSource}+${codexBarUsage.source}`
       : `${usageSource}+codexbar-session-logs`
   };
+}
+
+function selectStopWatchQuota({ quota, logQuota }) {
+  if (isZeroQuotaPlaceholder(quota) && hasNonZeroQuotaUsage(logQuota)) {
+    return logQuota;
+  }
+  return quota || logQuota || null;
+}
+
+function isZeroQuotaPlaceholder(quota) {
+  if (!quota || quota.source !== "codex-app-server") {
+    return false;
+  }
+  const values = [quota.primaryUsedPercent, quota.secondaryUsedPercent]
+    .map(numberOrNull)
+    .filter(value => value !== null);
+  return values.length > 0 && values.every(value => value === 0);
+}
+
+function hasNonZeroQuotaUsage(quota) {
+  if (!quota) {
+    return false;
+  }
+  return [quota.primaryUsedPercent, quota.secondaryUsedPercent]
+    .map(numberOrNull)
+    .some(value => value !== null && value > 0);
 }
 
 async function codexRateLimitSnapshot() {
