@@ -2,9 +2,14 @@
   "name": "kurisu-codex-stopwatch",
   "private": true,
   "type": "module",
+  "bin": {
+    "codex-watch-bridge": "bridge/codex-watch-bridge-cli.mjs"
+  },
   "scripts": {
-    "bridge": "node bridge/codex-watch-bridge.mjs",
+    "bridge": "node bridge/codex-watch-bridge-cli.mjs start",
+    "bridge:doctor": "node bridge/codex-watch-bridge-cli.mjs doctor",
+    "bridge:urls": "node bridge/codex-watch-bridge-cli.mjs urls",
     "test": "node --test tests/server/*.test.mjs",
-    "check": "node --check bridge/codex-watch-bridge.mjs && node --test tests/server/*.test.mjs"
+    "check": "node --check bridge/codex-watch-bridge.mjs && node --check bridge/codex-watch-bridge-cli.mjs && node --test tests/server/*.test.mjs"
   }
 }
