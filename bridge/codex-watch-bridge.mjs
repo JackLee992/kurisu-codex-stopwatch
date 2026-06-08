@@ -3086,6 +3086,8 @@ async function buildCodexUsageSnapshotValue(stateMessage, empty) {
   const todayStartMs = stopWatchStartOfDayMs(todayKey);
   let latestRecord = null;
   let latestTargetRecord = null;
+  let latestQuotaRecord = null;
+  let latestTargetQuotaRecord = null;
 
   for (const { file } of files) {
     const lines = readSessionUsageLines(file);
@@ -3115,6 +3117,16 @@ async function buildCodexUsageSnapshotValue(stateMessage, empty) {
         && (!latestTargetRecord || record.timestampMs > latestTargetRecord.timestampMs)) {
         latestTargetRecord = record;
       }
+      const recordQuota = stopWatchQuotaFromSessionRateLimits(record.rateLimits, record.timestamp);
+      if (recordQuota && !isZeroQuotaPlaceholder(recordQuota)) {
+        if (!latestQuotaRecord || record.timestampMs > latestQuotaRecord.timestampMs) {
+          latestQuotaRecord = record;
+        }
+        if (targetThreadId && threadId === targetThreadId
+          && (!latestTargetQuotaRecord || record.timestampMs > latestTargetQuotaRecord.timestampMs)) {
+          latestTargetQuotaRecord = record;
+        }
+      }
     }
   }
 
@@ -3130,7 +3142,8 @@ async function buildCodexUsageSnapshotValue(stateMessage, empty) {
   });
   const todayUsage = codexBarStyleDailyUsage(todayFiles, todayKey);
   const codexBarUsage = codexBarDailyUsageFromCache(todayKey);
-  const logQuota = stopWatchQuotaFromSessionRateLimits(chosen.rateLimits, chosen.timestamp);
+  const chosenQuotaRecord = latestTargetQuotaRecord || latestQuotaRecord || chosen;
+  const logQuota = stopWatchQuotaFromSessionRateLimits(chosenQuotaRecord.rateLimits, chosenQuotaRecord.timestamp);
   const selectedQuota = selectStopWatchQuota({ quota, logQuota });
   const usageSource = selectedQuota
     ? selectedQuota.source
@@ -3152,14 +3165,17 @@ async function buildCodexUsageSnapshotValue(stateMessage, empty) {
 }
 
 function selectStopWatchQuota({ quota, logQuota }) {
-  if (isZeroQuotaPlaceholder(quota) && hasNonZeroQuotaUsage(logQuota)) {
-    return logQuota;
+  if (isZeroQuotaPlaceholder(quota)) {
+    return logQuota || null;
+  }
+  if (isZeroQuotaPlaceholder(logQuota)) {
+    return quota || null;
   }
   return quota || logQuota || null;
 }
 
 function isZeroQuotaPlaceholder(quota) {
-  if (!quota || quota.source !== "codex-app-server") {
+  if (!quota) {
     return false;
   }
   const values = [quota.primaryUsedPercent, quota.secondaryUsedPercent]

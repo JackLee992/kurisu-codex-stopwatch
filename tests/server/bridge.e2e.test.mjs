@@ -756,6 +756,40 @@ describe("Codex Watch bridge E2E", { concurrency: false }, () => {
     assert.equal(snapshot.usage.quotaAlert, "none");
   });
 
+  test("StopWatch endpoint ignores zero session log quota placeholder when an earlier active quota exists", async () => {
+    process.env.CODEX_STOPWATCH_TODAY = "2026-05-24";
+    await appendTokenUsageFixture("thread-e2e-1", {
+      inputTokens: 120,
+      cachedInputTokens: 80,
+      outputTokens: 30,
+      reasoningOutputTokens: 10,
+      totalTokens: 160,
+      sessionTotalTokens: 3200,
+      primaryUsedPercent: 23,
+      secondaryUsedPercent: 42,
+      timestamp: "2026-05-24T08:30:00.000Z"
+    });
+    await appendTokenUsageFixture("thread-e2e-1", {
+      inputTokens: 160,
+      cachedInputTokens: 80,
+      outputTokens: 40,
+      reasoningOutputTokens: 10,
+      totalTokens: 210,
+      sessionTotalTokens: 3410,
+      primaryUsedPercent: 0,
+      secondaryUsedPercent: 0,
+      timestamp: "2026-05-24T08:34:00.000Z"
+    });
+
+    const snapshot = await getStopWatchState();
+
+    assert.equal(snapshot.usage.sessionTokens, 3410);
+    assert.equal(snapshot.usage.primaryUsedPercent, 23);
+    assert.equal(snapshot.usage.secondaryUsedPercent, 42);
+    assert.equal(snapshot.usage.primaryRemainingPercent, 77);
+    assert.equal(snapshot.usage.secondaryRemainingPercent, 58);
+  });
+
   test("StopWatch endpoint refreshes expired usage cache before responding", async () => {
     process.env.CODEX_STOPWATCH_TODAY = "2026-05-24";
     process.env.CODEX_STOPWATCH_USAGE_CACHE_MS = "0";
