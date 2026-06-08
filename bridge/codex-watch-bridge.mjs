@@ -37,10 +37,13 @@ const clients = new Set();
 const httpClients = new Map();
 const durableStateBySelection = new Map();
 const readStateSignaturesBySelection = new Map();
+const conversationEventsBySelection = new Map();
+let latestConversationEvents = [];
 let latestDurableState = null;
 let latestBridgeState = null;
 let cachedStopWatchUsage = null;
 let stopWatchUsageRefreshPromise = null;
+let cachedCodexPickerItems = null;
 
 export function createBridgeServer() {
   const server = http.createServer(async (request, response) => {
@@ -59,12 +62,26 @@ export function createBridgeServer() {
       return;
     }
 
+    if (requestURL.pathname === "/health" && request.method === "GET") {
+      jsonResponse(response, 200, buildBridgeHealth(server));
+      return;
+    }
+
     if (requestURL.pathname === "/codex-stopwatch/state" && request.method === "GET") {
       if (!isAuthorizedRequest(requestURL)) {
         jsonResponse(response, 401, { ok: false, error: "Unauthorized StopWatch client." });
         return;
       }
       jsonResponse(response, 200, await buildStopWatchSnapshot(server));
+      return;
+    }
+
+    if (requestURL.pathname === "/codex-stopwatch/conversation" && request.method === "GET") {
+      if (!isAuthorizedRequest(requestURL)) {
+        jsonResponse(response, 401, { ok: false, error: "Unauthorized StopWatch client." });
+        return;
+      }
+      jsonResponse(response, 200, buildStopWatchConversation(server));
       return;
     }
 
@@ -509,7 +526,12 @@ async function handleStopWatchTranscriptSend(client, message = {}) {
     ...client.selection
   });
 
-  await submitTranscriptToResolvedTarget(client, target, text);
+  try {
+    await submitTranscriptToResolvedTarget(client, target, text);
+  } catch (error) {
+    sendTranscriptSendFailure(client, error);
+    throw error;
+  }
   return {
     ok: true,
     text,
@@ -793,29 +815,36 @@ async function submitTranscriptToCodex(client, threadId, text) {
         input,
         expectedTurnId: activeTurn.id
       }, { timeoutMs: 30000 });
+      if (!watcher.isClosed()) {
+        send(client, {
+          type: "state",
+          pet: client.pet,
+          state: "thinking",
+          title: "Codex is thinking",
+          body: "Working on it",
+          capabilities: client.capabilities,
+          items: client.pickerItems,
+          ...client.selection
+        });
+      }
     } else {
       await appServer.request("turn/start", {
         threadId,
         input
       }, { timeoutMs: 30000 });
-    }
-
-    if (!watcher.isClosed()) {
-      send(client, {
-        type: "state",
-        pet: client.pet,
-        state: "thinking",
-        title: "Codex is thinking",
-        body: "Working on it",
-        capabilities: client.capabilities,
-        items: client.pickerItems,
-        ...client.selection
-      });
+      const didStart = await watcher.waitForStart(codexTurnStartTimeoutMs());
+      if (!didStart) {
+        throw new Error("Codex did not start after transcript send. Unlock the Mac and make sure Codex is running.");
+      }
     }
   } catch (error) {
     watcher.stop();
     throw error;
   }
+}
+
+function codexTurnStartTimeoutMs() {
+  return positiveEnvNumber("CODEX_STOPWATCH_TURN_START_TIMEOUT_MS", 8000);
 }
 
 async function sendTranscriptToCodexDesktopUI(text) {
@@ -898,6 +927,18 @@ function watchCodexTurn(client, threadId) {
   let responseText = "";
   let lastPreviewMs = 0;
   let isClosed = false;
+  let startResolved = false;
+  let resolveStarted;
+  const startedPromise = new Promise(resolve => {
+    resolveStarted = resolve;
+  });
+  const markStarted = () => {
+    if (startResolved) {
+      return;
+    }
+    startResolved = true;
+    resolveStarted(true);
+  };
   const sendTurnState = ({ state, title, body, text }) => {
     send(client, {
       type: "state",
@@ -921,6 +962,7 @@ function watchCodexTurn(client, threadId) {
     }
 
     if (method === "turn/started") {
+      markStarted();
       turnId = params.turn?.id || turnId;
       sendTurnState({
         state: "thinking",
@@ -934,11 +976,13 @@ function watchCodexTurn(client, threadId) {
       ? codexDesktopStateFromNotification(method, params)
       : null;
     if (desktopState) {
+      markStarted();
       sendTurnState(desktopState);
       return;
     }
 
     if (method === "item/agentMessage/delta") {
+      markStarted();
       if (turnId && params.turnId && params.turnId !== turnId) {
         return;
       }
@@ -960,6 +1004,7 @@ function watchCodexTurn(client, threadId) {
     }
 
     if (method === "turn/completed") {
+      markStarted();
       if (turnId && params.turn?.id && params.turn.id !== turnId) {
         return;
       }
@@ -993,7 +1038,16 @@ function watchCodexTurn(client, threadId) {
 
   return {
     stop: cleanup,
-    isClosed: () => isClosed
+    isClosed: () => isClosed,
+    waitForStart(timeoutMs) {
+      if (startResolved) {
+        return Promise.resolve(true);
+      }
+      return Promise.race([
+        startedPromise,
+        sleep(timeoutMs).then(() => false)
+      ]);
+    }
   };
 }
 
@@ -1605,6 +1659,9 @@ class MockCodexAppServerClient {
       }
       case "turn/start":
       case "turn/steer": {
+        if (process.env.CODEX_WATCH_MOCK_SUPPRESS_TURN_NOTIFICATIONS === "1") {
+          return {};
+        }
         const turnId = `mock-turn-${Date.now()}`;
         const threadId = params.threadId;
         queueMicrotask(() => {
@@ -2146,7 +2203,15 @@ function normalizePickerItems(items) {
     });
 }
 
-function loadCodexPickerItems() {
+function loadCodexPickerItems({ force = false } = {}) {
+  const now = Date.now();
+  const cacheMs = Number(process.env.CODEX_WATCH_PICKER_CACHE_MS || 60000);
+  if (!force
+    && cachedCodexPickerItems
+    && now - cachedCodexPickerItems.createdAtMs < cacheMs) {
+    return cachedCodexPickerItems.value;
+  }
+
   try {
     const sessionFiles = findSessionFiles(currentCodexSessionsDir())
       .map(file => ({ file, mtimeMs: fs.statSync(file).mtimeMs }))
@@ -2155,10 +2220,12 @@ function loadCodexPickerItems() {
     const sessions = sessionFiles
       .map(({ file, mtimeMs }) => readSessionSummary(file, mtimeMs))
       .filter(Boolean);
-    return buildPickerItems(sessions);
+    const value = buildPickerItems(sessions);
+    cachedCodexPickerItems = { createdAtMs: now, value };
+    return value;
   } catch (error) {
     warnBridge("failed to load Codex sessions", error);
-    return fallbackPickerItems();
+    return cachedCodexPickerItems?.value || fallbackPickerItems();
   }
 }
 
@@ -2218,7 +2285,7 @@ function findSessionFiles(directory) {
 }
 
 function readSessionSummary(file, mtimeMs) {
-  const lines = fs.readFileSync(file, "utf8").split("\n").filter(Boolean);
+  const lines = readSessionHeadTailLines(file);
   let meta = null;
   const userTexts = [];
   for (const line of lines) {
@@ -2513,6 +2580,63 @@ async function buildStopWatchSnapshot(server) {
   };
 }
 
+function buildBridgeHealth(server) {
+  return {
+    ok: true,
+    type: "bridge-health",
+    observedAt: new Date().toISOString(),
+    bridge: {
+      linked: true,
+      clients: clients.size,
+      port: boundPort(server),
+      tokenRequired: Boolean(currentPairingToken()),
+      updatedAt: new Date().toISOString()
+    },
+    endpoints: {
+      root: "/",
+      state: "/codex-stopwatch/state",
+      conversation: "/codex-stopwatch/conversation",
+      transcript: "/codex-stopwatch/transcript",
+      events: "/codex-watch/poll"
+    },
+    codex: {
+      appServerMode: stopWatchTranscriptSendMode() === "app-server",
+      mockAppServer: process.env.CODEX_WATCH_MOCK_APP_SERVER === "1"
+    }
+  };
+}
+
+function buildStopWatchConversation(server) {
+  syncStopWatchDesktopStateFromSessions();
+  const stateMessage = stopWatchStateMessage();
+  const key = selectionKey(stateMessage);
+  const events = conversationEventsBySelection.get(key) || latestConversationEvents;
+  const normalizedEvents = events.length > 0
+    ? events
+    : [conversationEventFromBridgeMessage(stateMessage)].filter(Boolean);
+
+  return {
+    ok: true,
+    type: "conversation-context",
+    observedAt: new Date().toISOString(),
+    bridge: {
+      linked: true,
+      clients: clients.size,
+      port: boundPort(server),
+      tokenRequired: Boolean(currentPairingToken()),
+      updatedAt: new Date().toISOString()
+    },
+    selection: {
+      project: stateMessage.project || null,
+      chat: stateMessage.chat || null,
+      projectIndex: integerOrNull(stateMessage.projectIndex),
+      chatIndex: integerOrNull(stateMessage.chatIndex)
+    },
+    messages: conversationMessagesFromEvents(normalizedEvents),
+    events: normalizedEvents.slice(-100)
+  };
+}
+
 function stopWatchRecentForState(message = {}) {
   return {
     activity: typeof message.activity === "string" ? message.activity : "",
@@ -2719,14 +2843,25 @@ function stopWatchDesktopStateFromSessionFile(file, mtimeMs, pickerItems = []) {
 }
 
 function readSessionHeadTailLines(file) {
+  const maxFullBytes = positiveEnvNumber("CODEX_STOPWATCH_DESKTOP_SYNC_FULL_READ_BYTES", 512 * 1024);
+  const headBytes = positiveEnvNumber("CODEX_STOPWATCH_DESKTOP_SYNC_HEAD_BYTES", 32 * 1024);
+  const tailBytes = positiveEnvNumber("CODEX_STOPWATCH_DESKTOP_SYNC_TAIL_BYTES", 256 * 1024);
+  return readSessionWindowLines(file, { maxFullBytes, headBytes, tailBytes });
+}
+
+function readSessionUsageLines(file) {
+  const maxFullBytes = positiveEnvNumber("CODEX_STOPWATCH_USAGE_FULL_READ_BYTES", 2 * 1024 * 1024);
+  const headBytes = positiveEnvNumber("CODEX_STOPWATCH_USAGE_HEAD_BYTES", 32 * 1024);
+  const tailBytes = positiveEnvNumber("CODEX_STOPWATCH_USAGE_TAIL_BYTES", 8 * 1024 * 1024);
+  return readSessionWindowLines(file, { maxFullBytes, headBytes, tailBytes });
+}
+
+function readSessionWindowLines(file, { maxFullBytes, headBytes, tailBytes }) {
   const stat = fs.statSync(file);
-  const maxFullBytes = Number(process.env.CODEX_STOPWATCH_DESKTOP_SYNC_FULL_READ_BYTES || 512 * 1024);
   if (stat.size <= maxFullBytes) {
     return fs.readFileSync(file, "utf8").split("\n").filter(Boolean);
   }
 
-  const headBytes = Number(process.env.CODEX_STOPWATCH_DESKTOP_SYNC_HEAD_BYTES || 32 * 1024);
-  const tailBytes = Number(process.env.CODEX_STOPWATCH_DESKTOP_SYNC_TAIL_BYTES || 256 * 1024);
   const fd = fs.openSync(file, "r");
   try {
     const headBuffer = Buffer.alloc(Math.min(headBytes, stat.size));
@@ -2744,6 +2879,11 @@ function readSessionHeadTailLines(file) {
   } finally {
     fs.closeSync(fd);
   }
+}
+
+function positiveEnvNumber(name, fallback) {
+  const value = Number(process.env[name] || fallback);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
 function finalAnswerTextFromEvent(event) {
@@ -2948,7 +3088,7 @@ async function buildCodexUsageSnapshotValue(stateMessage, empty) {
   let latestTargetRecord = null;
 
   for (const { file } of files) {
-    const lines = fs.readFileSync(file, "utf8").split("\n").filter(Boolean);
+    const lines = readSessionUsageLines(file);
     let threadId = null;
     for (const line of lines) {
       const event = parseJSONLine(line);
@@ -3264,7 +3404,7 @@ function codexBarStyleDailyUsage(files, todayKey) {
   let cached = 0;
 
   for (const { file } of files) {
-    const lines = fs.readFileSync(file, "utf8").split("\n").filter(Boolean);
+    const lines = readSessionUsageLines(file);
     for (const line of lines) {
       const event = parseJSONLine(line);
       if (!event || event.type !== "event_msg" || event.payload?.type !== "token_count") {
@@ -3450,8 +3590,111 @@ function durableStateSignature(value = {}) {
   ].join("\u001f");
 }
 
+function rememberConversationEvent(message) {
+  const event = conversationEventFromBridgeMessage(message);
+  if (!event) {
+    return;
+  }
+  const key = selectionKey(event);
+  const keyedEvents = conversationEventsBySelection.get(key) || [];
+  keyedEvents.push(event);
+  conversationEventsBySelection.set(key, keyedEvents.slice(-100));
+
+  latestConversationEvents.push(event);
+  latestConversationEvents = latestConversationEvents.slice(-100);
+}
+
+function conversationEventFromBridgeMessage(message = {}) {
+  if (!message || typeof message !== "object") {
+    return null;
+  }
+  if (!["state", "transcript"].includes(message.type)) {
+    return null;
+  }
+
+  const text = stringOrNull(message.text)
+    || stringOrNull(message.body)
+    || stringOrNull(message.title)
+    || "";
+  if (!text && !stringOrNull(message.title)) {
+    return null;
+  }
+
+  const observedAt = stringOrNull(message.observedAt) || new Date().toISOString();
+  const state = normalizeStatus(message.state) || "";
+  const role = conversationRoleForMessage(message, state);
+  const title = stringOrNull(message.title) || conversationTitleForRole(role);
+  const body = stringOrNull(message.body) || text;
+
+  return {
+    id: conversationEventID({ observedAt, role, type: message.type, state, title, text }),
+    role,
+    type: message.type,
+    state,
+    title,
+    body,
+    text,
+    observedAt,
+    project: stringOrNull(message.project) || null,
+    chat: stringOrNull(message.chat) || null,
+    projectIndex: integerOrNull(message.projectIndex),
+    chatIndex: integerOrNull(message.chatIndex)
+  };
+}
+
+function conversationRoleForMessage(message, state) {
+  if (message.type === "transcript") {
+    return "user";
+  }
+  if (state === "review" || /reply|replied/i.test(String(message.title || ""))) {
+    return "assistant";
+  }
+  return "status";
+}
+
+function conversationTitleForRole(role) {
+  switch (role) {
+    case "user":
+      return "User command";
+    case "assistant":
+      return "Codex replied";
+    default:
+      return "Bridge status";
+  }
+}
+
+function conversationEventID(event) {
+  const raw = [
+    event.observedAt,
+    event.role,
+    event.type,
+    event.state,
+    event.title,
+    event.text
+  ].join("\u001f");
+  return crypto.createHash("sha1").update(raw).digest("hex").slice(0, 16);
+}
+
+function conversationMessagesFromEvents(events) {
+  return events
+    .filter(event => event.role === "user" || event.role === "assistant")
+    .map(event => ({
+      id: event.id,
+      role: event.role,
+      title: event.title,
+      body: event.body,
+      text: event.text,
+      observedAt: event.observedAt,
+      project: event.project,
+      chat: event.chat,
+      projectIndex: event.projectIndex,
+      chatIndex: event.chatIndex
+    }));
+}
+
 function send(client, message) {
   rememberDurableState(message);
+  rememberConversationEvent(message);
   if (Array.isArray(client.queue)) {
     client.queue.push(message);
     return;
@@ -3605,6 +3848,8 @@ export function resetBridgeStateForTests() {
   httpClients.clear();
   durableStateBySelection.clear();
   readStateSignaturesBySelection.clear();
+  conversationEventsBySelection.clear();
+  latestConversationEvents = [];
   latestDurableState = null;
   latestBridgeState = null;
   cachedStopWatchUsage = null;

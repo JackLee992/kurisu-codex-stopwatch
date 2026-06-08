@@ -412,6 +412,36 @@ describe("Codex Watch bridge E2E", { concurrency: false }, () => {
     assert.ok(messages.some(message => message.title === "Codex replied"));
   });
 
+  test("StopWatch transcript endpoint waits for a real Codex turn before thinking", async () => {
+    process.env.CODEX_STOPWATCH_TURN_START_TIMEOUT_MS = "50";
+    process.env.CODEX_WATCH_MOCK_SUPPRESS_TURN_NOTIFICATIONS = "1";
+    await postMessage("stopwatch-state-source", {
+      type: "state",
+      pet: "codex",
+      state: "idle",
+      title: "Codex",
+      body: "Bridge ready",
+      project: `project:${path.join(tempDir, "project-one")}`,
+      chat: "thread-e2e-1",
+      projectIndex: 0,
+      chatIndex: 0
+    });
+
+    const response = await postJSON("/codex-stopwatch/transcript", {
+      text: "请继续。",
+      chat: "thread-e2e-1"
+    });
+    const messages = await pollUntil("stopwatch-device", allMessages => {
+      return allMessages.some(message => message.title === "Send failed");
+    }, 1000);
+
+    assert.equal(response.ok, false);
+    assert.match(response.error || "", /did not start/i);
+    assert.ok(messages.some(message => message.title === "Sending"));
+    assert.ok(messages.some(message => message.title === "Send failed"));
+    assert.equal(messages.some(message => message.title === "Codex is thinking"), false);
+  });
+
   test("StopWatch visible UI mode sends confirmed text through the Codex desktop surface", async () => {
     process.env.CODEX_STOPWATCH_SEND_MODE = "visible-ui";
     process.env.CODEX_STOPWATCH_UI_SEND_MOCK = "1";
@@ -713,6 +743,63 @@ describe("Codex Watch bridge E2E", { concurrency: false }, () => {
     assert.equal(accepted.ok, true);
     assert.equal(accepted.messages.at(-1)?.body, "Bridge ready");
   });
+
+  test("health endpoint reports bridge readiness for iPhone diagnostics", async () => {
+    const health = await getJSON("/health");
+
+    assert.equal(health.ok, true);
+    assert.equal(health.type, "bridge-health");
+    assert.equal(health.bridge.linked, true);
+    assert.equal(health.bridge.tokenRequired, false);
+    assert.equal(typeof health.bridge.port, "number");
+    assert.equal(health.endpoints.state, "/codex-stopwatch/state");
+    assert.equal(health.endpoints.conversation, "/codex-stopwatch/conversation");
+  });
+
+  test("conversation endpoint returns recent bridge context for iPhone chat", async () => {
+    const project = `project:${path.join(tempDir, "project-one")}`;
+    await postMessage("conversation-client", {
+      type: "hello",
+      pet: "codex",
+      project,
+      chat: "thread-e2e-1",
+      projectIndex: 0,
+      chatIndex: 0
+    });
+    await postMessage("conversation-client", {
+      type: "transcript",
+      pet: "codex",
+      title: "Transcript",
+      body: "请继续完成闭环。",
+      text: "请继续完成闭环。",
+      project,
+      chat: "thread-e2e-1",
+      projectIndex: 0,
+      chatIndex: 0
+    });
+    await postMessage("conversation-client", {
+      type: "state",
+      pet: "codex",
+      state: "review",
+      title: "Codex replied",
+      body: "已完成服务端闭环。",
+      text: "已完成服务端闭环。这里是完整回复正文。",
+      project,
+      chat: "thread-e2e-1",
+      projectIndex: 0,
+      chatIndex: 0
+    });
+
+    const conversation = await getJSON("/codex-stopwatch/conversation");
+
+    assert.equal(conversation.ok, true);
+    assert.equal(conversation.type, "conversation-context");
+    assert.equal(conversation.selection.chat, "thread-e2e-1");
+    assert.ok(conversation.messages.length >= 2);
+    assert.ok(conversation.messages.some(message => message.role === "user" && message.text === "请继续完成闭环。"));
+    assert.ok(conversation.messages.some(message => message.role === "assistant" && message.text.includes("完整回复正文")));
+    assert.ok(conversation.events.some(event => event.title === "Codex replied"));
+  });
 });
 
 async function writeSessionFixture(root, { threadId, cwd, prompt }) {
@@ -837,6 +924,11 @@ async function poll(client) {
 
 async function getStopWatchState() {
   const response = await fetch(`${baseURL()}/codex-stopwatch/state`);
+  return response.json();
+}
+
+async function getJSON(pathname) {
+  const response = await fetch(`${baseURL()}${pathname}`);
   return response.json();
 }
 
