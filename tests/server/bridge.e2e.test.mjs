@@ -28,6 +28,7 @@ describe("Codex Watch bridge E2E", { concurrency: false }, () => {
     process.env.CODEX_STOPWATCH_CODEXBAR_COST_PATH = path.join(tempDir, "missing-codex-cost.json");
     process.env.CODEX_WATCH_MOCK_APP_SERVER = "1";
     process.env.CODEX_WATCH_MOCK_REPLY = "Mock **reply** with `inlineCode`.";
+    process.env.CODEX_STOPWATCH_NOW_ISO = "2026-05-24T08:35:00.000Z";
     resetBridgeStateForTests();
     server = startBridge({ port: 0, host: "127.0.0.1" });
     await once(server, "listening");
@@ -650,6 +651,72 @@ describe("Codex Watch bridge E2E", { concurrency: false }, () => {
     assert.match(snapshot.usage.source, /codex-app-server/);
   });
 
+  test("StopWatch endpoint ignores expired Codex app-server quota windows", async () => {
+    process.env.CODEX_STOPWATCH_TODAY = "2026-05-24";
+    process.env.CODEX_WATCH_MOCK_RATE_LIMITS_JSON = JSON.stringify({
+      rateLimits: {
+        limitId: "codex",
+        primary: {
+          usedPercent: 100,
+          windowDurationMins: 300,
+          resetsAt: 1
+        },
+        secondary: {
+          usedPercent: 100,
+          windowDurationMins: 10080,
+          resetsAt: 1
+        },
+        planType: "pro"
+      }
+    });
+    await appendTokenUsageFixture("thread-e2e-1", {
+      inputTokens: 120,
+      cachedInputTokens: 80,
+      outputTokens: 30,
+      reasoningOutputTokens: 10,
+      totalTokens: 160,
+      sessionTotalTokens: 3200,
+      primaryUsedPercent: 41,
+      secondaryUsedPercent: 7
+    });
+
+    const snapshot = await getStopWatchState();
+
+    assert.equal(snapshot.usage.primaryUsedPercent, 41);
+    assert.equal(snapshot.usage.secondaryUsedPercent, 7);
+    assert.equal(snapshot.usage.primaryRemainingPercent, 59);
+    assert.equal(snapshot.usage.secondaryRemainingPercent, 93);
+    assert.equal(snapshot.usage.quotaAlert, "none");
+    assert.match(snapshot.usage.source, /codex-session-logs/);
+  });
+
+  test("StopWatch endpoint does not expose expired session log quota as current usage", async () => {
+    process.env.CODEX_STOPWATCH_TODAY = "2026-05-24";
+    await appendTokenUsageFixture("thread-e2e-1", {
+      inputTokens: 120,
+      cachedInputTokens: 80,
+      outputTokens: 30,
+      reasoningOutputTokens: 10,
+      totalTokens: 160,
+      sessionTotalTokens: 3200,
+      primaryUsedPercent: 100,
+      secondaryUsedPercent: 100,
+      primaryResetsAt: 1,
+      secondaryResetsAt: 1
+    });
+
+    const snapshot = await getStopWatchState();
+
+    assert.equal(snapshot.usage.sessionTokens, 3200);
+    assert.equal(snapshot.usage.primaryUsedPercent, null);
+    assert.equal(snapshot.usage.secondaryUsedPercent, null);
+    assert.equal(snapshot.usage.primaryRemainingPercent, null);
+    assert.equal(snapshot.usage.secondaryRemainingPercent, null);
+    assert.equal(snapshot.usage.primaryQuotaState, "unknown");
+    assert.equal(snapshot.usage.secondaryQuotaState, "unknown");
+    assert.equal(snapshot.usage.quotaAlert, "none");
+  });
+
   test("StopWatch endpoint marks high quota windows for compact alerts", async () => {
     process.env.CODEX_STOPWATCH_TODAY = "2026-05-24";
     process.env.CODEX_WATCH_MOCK_RATE_LIMITS_JSON = JSON.stringify({
@@ -836,7 +903,9 @@ async function appendTokenUsageFixture(threadId, {
   totalTokens,
   sessionTotalTokens,
   primaryUsedPercent,
-  secondaryUsedPercent
+  secondaryUsedPercent,
+  primaryResetsAt = 1779773228,
+  secondaryResetsAt = 1780187853
 }) {
   const file = path.join(tempDir, "2026", "05", "24", `${threadId}.jsonl`);
   const event = {
@@ -865,12 +934,12 @@ async function appendTokenUsageFixture(threadId, {
         primary: {
           used_percent: primaryUsedPercent,
           window_minutes: 300,
-          resets_at: 1779773228
+          resets_at: primaryResetsAt
         },
         secondary: {
           used_percent: secondaryUsedPercent,
           window_minutes: 10080,
-          resets_at: 1780187853
+          resets_at: secondaryResetsAt
         }
       }
     }

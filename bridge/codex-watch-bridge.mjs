@@ -3135,6 +3135,7 @@ async function buildCodexUsageSnapshotValue(stateMessage, empty) {
     ? quota.source
     : logQuota?.source || "codex-session-logs";
   return {
+    ...empty,
     sessionTokens: codexBarUsage?.sessionTokens ?? tokenUsageTotal(chosen.info?.total_token_usage),
     lastTurnTokens: tokenUsageTotal(chosen.info?.last_token_usage),
     todayTokens: codexBarUsage?.tokens ?? (todayUsage.turns > 0 ? todayUsage.tokens : null),
@@ -3208,22 +3209,60 @@ function rpcRateWindow(window) {
   if (!window || typeof window !== "object") {
     return null;
   }
-  return {
-    usedPercent: numberOrNull(window.usedPercent),
+  return activeRateWindow({
+    usedPercent: percentOrNull(window.usedPercent),
     windowMinutes: integerOrNull(window.windowDurationMins),
     resetsAt: integerOrNull(window.resetsAt)
-  };
+  });
 }
 
 function sessionRateWindow(window) {
   if (!window || typeof window !== "object") {
     return null;
   }
-  return {
-    usedPercent: numberOrNull(window.used_percent) ?? numberOrNull(window.usedPercent),
+  return activeRateWindow({
+    usedPercent: percentOrNull(window.used_percent) ?? percentOrNull(window.usedPercent),
     windowMinutes: integerOrNull(window.window_minutes) ?? integerOrNull(window.windowDurationMins),
     resetsAt: integerOrNull(window.resets_at) ?? integerOrNull(window.resetsAt)
-  };
+  });
+}
+
+function activeRateWindow(window) {
+  if (!window || rateWindowExpired(window)) {
+    return null;
+  }
+  if (window.usedPercent === null && window.windowMinutes === null && window.resetsAt === null) {
+    return null;
+  }
+  return window;
+}
+
+function rateWindowExpired(window) {
+  const resetsAtMs = epochMilliseconds(window?.resetsAt);
+  return resetsAtMs !== null && resetsAtMs <= stopWatchNowMs();
+}
+
+function epochMilliseconds(value) {
+  const timestamp = integerOrNull(value);
+  if (timestamp === null) {
+    return null;
+  }
+  return timestamp > 1_000_000_000_000 ? timestamp : timestamp * 1000;
+}
+
+function stopWatchNowMs() {
+  const fixedMs = Number(process.env.CODEX_STOPWATCH_NOW_MS);
+  if (Number.isFinite(fixedMs) && fixedMs > 0) {
+    return fixedMs;
+  }
+  const fixedISO = process.env.CODEX_STOPWATCH_NOW_ISO;
+  if (fixedISO) {
+    const parsed = Date.parse(fixedISO);
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+  return Date.now();
 }
 
 function normalizeCodexRateWindows({ primary, secondary }) {
@@ -3491,6 +3530,11 @@ function positiveInteger(value) {
 
 function numberOrNull(value) {
   return Number.isFinite(value) ? value : null;
+}
+
+function percentOrNull(value) {
+  const percent = numberOrNull(value);
+  return percent !== null && percent >= 0 && percent <= 100 ? percent : null;
 }
 
 function stopWatchTodayKey() {
