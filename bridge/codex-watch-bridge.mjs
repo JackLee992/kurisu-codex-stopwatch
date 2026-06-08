@@ -8,7 +8,7 @@ import process from "node:process";
 import { execFile, execFileSync, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-const port = Number(process.env.CODEX_WATCH_PORT || 17842);
+const port = Number(process.env.CODEX_WATCH_PORT || 17843);
 const host = process.env.CODEX_WATCH_HOST || "::";
 const audioDir = path.join(process.cwd(), ".codex-watch", "audio");
 const defaultCodexSessionsDir = path.join(os.homedir(), ".codex", "sessions");

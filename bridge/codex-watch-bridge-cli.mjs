@@ -1,12 +1,16 @@
 #!/usr/bin/env node
 import http from "node:http";
 import os from "node:os";
+import fs from "node:fs";
+import path from "node:path";
 import process from "node:process";
 import { once } from "node:events";
 import { startBridge } from "./codex-watch-bridge.mjs";
 
-const DEFAULT_PORT = Number(process.env.CODEX_WATCH_PORT || 17842);
+const DEFAULT_PORT = Number(process.env.CODEX_WATCH_PORT || 17843);
 const DEFAULT_HOST = process.env.CODEX_WATCH_HOST || "::";
+const DEFAULT_TOKEN_FILE = process.env.CODEX_WATCH_PAIRING_TOKEN_FILE
+  || path.join(process.cwd(), ".codex-buddy-watch", "pairing-token");
 
 async function main(argv = process.argv.slice(2)) {
   const { command, options } = parseArgs(argv);
@@ -57,10 +61,14 @@ function parseArgs(argv) {
 async function startCommand(options) {
   const host = stringOption(options.host, DEFAULT_HOST);
   const port = numberOption(options.port, DEFAULT_PORT);
+  const token = pairingToken(options);
+  if (token) {
+    process.env.CODEX_WATCH_PAIRING_TOKEN = token;
+  }
   const server = startBridge({ host, port });
   await once(server, "listening");
 
-  printURLGuide({ host, port: boundPort(server), title: "Codex Watch Bridge Ready" });
+  printURLGuide({ host, port: boundPort(server), token, title: "Codex Watch Bridge Ready" });
   console.log("");
   console.log("Keep this terminal open while using the Watch app.");
 }
@@ -68,15 +76,17 @@ async function startCommand(options) {
 function urlsCommand(options) {
   const host = stringOption(options.host, DEFAULT_HOST);
   const port = numberOption(options.port, DEFAULT_PORT);
-  printURLGuide({ host, port, title: "Codex Watch Bridge URLs" });
+  const token = pairingToken(options);
+  printURLGuide({ host, port, token, title: "Codex Watch Bridge URLs" });
 }
 
 async function doctorCommand(options) {
   const port = numberOption(options.port, DEFAULT_PORT);
   const baseURL = normalizeBaseURL(stringOption(options["base-url"], `http://127.0.0.1:${port}`));
-  const timeoutMs = numberOption(options["timeout-ms"], 5000);
+  const timeoutMs = numberOption(options["timeout-ms"], 15000);
+  const token = pairingToken(options);
   const rootResult = await requestJSON(`${baseURL}/`, timeoutMs);
-  const stateResult = await requestJSON(`${baseURL}/codex-stopwatch/state`, timeoutMs);
+  const stateResult = await requestJSON(withToken(`${baseURL}/codex-stopwatch/state`, token), timeoutMs);
 
   console.log("Codex Watch Bridge Doctor");
   console.log(`Base URL: ${baseURL}`);
@@ -86,7 +96,7 @@ async function doctorCommand(options) {
 
   if (rootResult.ok && stateResult.ok) {
     console.log("Result: OK");
-    console.log(`Use this in the Watch app: ${watchURLForPort(port)}`);
+    console.log(`Use this in the Watch app: ${watchURLForPort(port)}${token ? "?token=<pairing-token>" : ""}`);
     return;
   }
 
@@ -99,29 +109,33 @@ async function doctorCommand(options) {
   process.exitCode = 1;
 }
 
-function printURLGuide({ host, port, title }) {
+function printURLGuide({ host, port, token, title }) {
   const lanURL = watchURLForPort(port);
   const localName = localHostName();
   const localURL = localName ? `http://${localName}.local:${port}` : null;
+  const tokenHint = token ? "?token=<pairing-token>" : "";
 
   console.log(title);
   console.log(`Listening host: ${host}`);
   console.log(`Port: ${port}`);
   console.log("");
-  console.log(`Watch app URL: ${lanURL}`);
+  console.log(`Watch app URL: ${lanURL}${tokenHint}`);
   if (localURL) {
-    console.log(`Hostname URL: ${localURL}`);
+    console.log(`Hostname URL: ${localURL}${tokenHint}`);
   }
   console.log(`Simulator URL: http://127.0.0.1:${port}`);
   console.log("");
-  console.log(`State check: curl -sS --max-time 3 ${lanURL}/codex-stopwatch/state`);
+  console.log(`State check: curl -sS --max-time 3 ${lanURL}/codex-stopwatch/state${tokenHint}`);
   console.log("Self-check: codex-watch-bridge doctor");
   console.log("");
   console.log("Apple Watch setup:");
   console.log("  1. Open Codex Buddy on Apple Watch.");
   console.log("  2. Tap the bridge warning or open System > Bridge.");
-  console.log(`  3. Set URL to ${lanURL}`);
+  console.log(`  3. Set URL to ${lanURL}${tokenHint}`);
   console.log("  4. Avoid 127.0.0.1 and localhost on a physical Apple Watch.");
+  if (token) {
+    console.log("  5. Keep the real token private; the CLI prints <pairing-token> as a placeholder.");
+  }
 }
 
 function printCheck(label, result) {
@@ -176,6 +190,35 @@ function normalizeBaseURL(value) {
   return value.replace(/\/+$/, "");
 }
 
+function withToken(url, token) {
+  if (!token) {
+    return url;
+  }
+  const requestURL = new URL(url);
+  requestURL.searchParams.set("token", token);
+  return requestURL.toString();
+}
+
+function pairingToken(options) {
+  const explicitToken = stringOption(options.token, "");
+  if (explicitToken) {
+    return explicitToken;
+  }
+  const envToken = stringOption(process.env.CODEX_WATCH_PAIRING_TOKEN, "");
+  if (envToken) {
+    return envToken;
+  }
+  return readTokenFile(stringOption(options["token-file"], DEFAULT_TOKEN_FILE));
+}
+
+function readTokenFile(filePath) {
+  try {
+    return fs.readFileSync(filePath, "utf8").trim();
+  } catch {
+    return "";
+  }
+}
+
 function boundPort(server) {
   const address = server.address();
   return typeof address === "object" && address ? address.port : DEFAULT_PORT;
@@ -194,9 +237,9 @@ function printHelp() {
   console.log(`Codex Watch bridge CLI
 
 Usage:
-  codex-watch-bridge start [--host ::] [--port 17842]
-  codex-watch-bridge urls [--host ::] [--port 17842]
-  codex-watch-bridge doctor [--base-url http://127.0.0.1:17842] [--timeout-ms 5000]
+  codex-watch-bridge start [--host ::] [--port 17843] [--token-file .codex-buddy-watch/pairing-token]
+  codex-watch-bridge urls [--host ::] [--port 17843] [--token-file .codex-buddy-watch/pairing-token]
+  codex-watch-bridge doctor [--base-url http://127.0.0.1:17843] [--timeout-ms 15000] [--token-file .codex-buddy-watch/pairing-token]
 
 Commands:
   start   Start the bridge and print Watch connection instructions.
