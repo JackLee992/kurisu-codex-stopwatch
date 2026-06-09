@@ -122,7 +122,7 @@ async function pairCommand(options) {
   console.log("iPhone setup:");
   console.log("  1. Open Codex Buddy on iPhone.");
   console.log("  2. Open Bridge settings.");
-  console.log("  3. Scan this QR code or paste the pairing payload.");
+  console.log("  3. Scan this QR code, or rerun with --show-payload and paste the payload.");
   if (options["show-payload"] === "true" || options["show-payload"] === true) {
     console.log("");
     console.log(`Pairing payload: ${payload}`);
