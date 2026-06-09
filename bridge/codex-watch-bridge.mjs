@@ -44,6 +44,7 @@ let latestBridgeState = null;
 let cachedStopWatchUsage = null;
 let stopWatchUsageRefreshPromise = null;
 let cachedCodexPickerItems = null;
+const bridgeStartedAtMs = Date.now();
 
 export function createBridgeServer() {
   const server = http.createServer(async (request, response) => {
@@ -63,7 +64,7 @@ export function createBridgeServer() {
     }
 
     if (requestURL.pathname === "/health" && request.method === "GET") {
-      jsonResponse(response, 200, buildBridgeHealth(server));
+      jsonResponse(response, 200, await buildBridgeHealth(server, requestURL));
       return;
     }
 
@@ -137,6 +138,8 @@ export function createBridgeServer() {
         return;
       }
       const client = getHTTPClient(clientIDFromURL(requestURL), request.socket);
+      client.lastPollAt = new Date(stopWatchNowMs()).toISOString();
+      client.lastSeenMode = requestURL.searchParams.get("mode") || client.lastSeenMode || null;
       enqueueLatestStopWatchStateForPoll(client);
       jsonResponse(response, 200, { ok: true, messages: drainQueuedMessages(client) });
       return;
@@ -2564,6 +2567,7 @@ async function buildStopWatchSnapshot(server) {
     event: stopWatchEventForState(state, stateMessage),
     observedAt: stateMessage.observedAt || null,
     recent: stopWatchRecentForState(stateMessage),
+    stateFreshness: stateFreshnessHealth(stateMessage),
     usage: await codexUsageSnapshot(stateMessage),
     bridge: {
       linked: true,
@@ -2581,18 +2585,33 @@ async function buildStopWatchSnapshot(server) {
   };
 }
 
-function buildBridgeHealth(server) {
+async function buildBridgeHealth(server, requestURL = new URL("http://localhost/")) {
+  syncStopWatchDesktopStateFromSessions();
+  const stateMessage = stopWatchStateMessage();
+  const auth = authHealth(requestURL);
+  const codex = {
+    appServer: await codexAppServerHealth(),
+    sessions: codexSessionHealth()
+  };
+  const state = stateFreshnessHealth(stateMessage);
+  const clientsHealth = bridgeClientsHealth();
+  const network = bridgeNetworkHealth(server);
+  const diagnosis = bridgeDiagnosis({ auth, codex, state, network });
+
   return {
     ok: true,
     type: "bridge-health",
+    version: 2,
     observedAt: new Date().toISOString(),
     bridge: {
       linked: true,
       clients: clients.size,
       port: boundPort(server),
       tokenRequired: Boolean(currentPairingToken()),
+      uptimeSeconds: Math.max(0, Math.round((Date.now() - bridgeStartedAtMs) / 1000)),
       updatedAt: new Date().toISOString()
     },
+    auth,
     endpoints: {
       root: "/",
       state: "/codex-stopwatch/state",
@@ -2602,8 +2621,184 @@ function buildBridgeHealth(server) {
     },
     codex: {
       appServerMode: stopWatchTranscriptSendMode() === "app-server",
-      mockAppServer: process.env.CODEX_WATCH_MOCK_APP_SERVER === "1"
+      mockAppServer: process.env.CODEX_WATCH_MOCK_APP_SERVER === "1",
+      ...codex
+    },
+    clients: clientsHealth,
+    network,
+    state,
+    diagnosis
+  };
+}
+
+function authHealth(requestURL) {
+  const required = Boolean(currentPairingToken());
+  const accepted = isAuthorizedRequest(requestURL);
+  let reason = "token-not-required";
+  if (required && accepted) {
+    reason = "token-accepted";
+  } else if (required && !accepted) {
+    reason = "token-rejected";
+  }
+  return { required, accepted, reason };
+}
+
+async function codexAppServerHealth() {
+  const mode = stopWatchTranscriptSendMode();
+  if (mode !== "app-server") {
+    return {
+      ready: false,
+      signedIn: false,
+      mode,
+      error: "Bridge is not configured to use Codex app-server."
+    };
+  }
+  if (process.env.CODEX_WATCH_MOCK_APP_SERVER === "1") {
+    return {
+      ready: true,
+      signedIn: true,
+      mode: "mock",
+      error: null
+    };
+  }
+
+  try {
+    const status = await getCodexAppServer().request("getAuthStatus", {
+      includeToken: true,
+      refreshToken: false
+    }, {
+      timeoutMs: positiveEnvNumber("CODEX_WATCH_HEALTH_APP_SERVER_TIMEOUT_MS", 1200)
+    });
+    return {
+      ready: true,
+      signedIn: Boolean(status?.signedIn || status?.authenticated || status?.isAuthenticated || status?.authToken),
+      mode,
+      error: null
+    };
+  } catch (error) {
+    return {
+      ready: false,
+      signedIn: false,
+      mode,
+      error: truncate(String(error?.message || error), 180)
+    };
+  }
+}
+
+function codexSessionHealth() {
+  try {
+    const files = findSessionFilesInRoots(currentCodexSessionRoots())
+      .map(file => fs.statSync(file).mtimeMs)
+      .filter(value => Number.isFinite(value))
+      .sort((left, right) => right - left);
+    const latestAt = files.length > 0 ? new Date(files[0]).toISOString() : null;
+    return {
+      readable: true,
+      fileCount: files.length,
+      latestAt,
+      error: null
+    };
+  } catch (error) {
+    return {
+      readable: false,
+      fileCount: 0,
+      latestAt: null,
+      error: truncate(String(error?.message || error), 180)
+    };
+  }
+}
+
+function stateFreshnessHealth(message = {}) {
+  const observedAt = stringOrNull(message.observedAt) || stringOrNull(message.updatedAt);
+  const observedMs = stateObservedMs(message);
+  const nowMs = stopWatchNowMs();
+  const ageSeconds = observedMs > 0
+    ? Math.max(0, Math.round((nowMs - observedMs) / 1000))
+    : 0;
+  const staleAfterSeconds = positiveEnvNumber("CODEX_WATCH_STATE_STALE_AFTER_SECONDS", 30);
+  return {
+    observedAt: observedAt || null,
+    ageSeconds,
+    stale: observedMs > 0 ? ageSeconds > staleAfterSeconds : false,
+    staleAfterSeconds,
+    source: stringOrNull(message.source) || "bridge-memory"
+  };
+}
+
+function bridgeClientsHealth() {
+  let lastPollAt = null;
+  let lastSeenMode = null;
+  for (const client of httpClients.values()) {
+    if (client.lastPollAt && (!lastPollAt || Date.parse(client.lastPollAt) > Date.parse(lastPollAt))) {
+      lastPollAt = client.lastPollAt;
+      lastSeenMode = client.lastSeenMode || lastSeenMode;
     }
+  }
+  return {
+    count: clients.size,
+    lastPollAt,
+    lastSeenMode
+  };
+}
+
+function bridgeNetworkHealth(server) {
+  const portNumber = boundPort(server);
+  const lan = lanAddress();
+  const hostName = localHostName();
+  const publicURL = stringOrNull(process.env.CODEX_WATCH_PUBLIC_URL)
+    || stringOrNull(process.env.CODEX_BUDDY_PUBLIC_URL)
+    || stringOrNull(process.env.TAILSCALE_FUNNEL_URL);
+  return {
+    lan: {
+      reachable: true,
+      url: `http://${lan}:${portNumber}`,
+      latencyMs: null
+    },
+    hostname: {
+      url: hostName ? `http://${hostName}.local:${portNumber}` : null
+    },
+    public: {
+      reachable: null,
+      url: publicURL,
+      latencyMs: null
+    }
+  };
+}
+
+function bridgeDiagnosis({ auth, codex, state, network }) {
+  if (auth.required && !auth.accepted) {
+    return {
+      code: "TOKEN_REJECTED",
+      action: "Update the pairing token from the Mac bridge."
+    };
+  }
+  if (!codex.appServer.ready) {
+    return {
+      code: "BRIDGE_OK_CODEX_OFFLINE",
+      action: "Open Codex or run `codex-watch-bridge doctor` on the Mac."
+    };
+  }
+  if (!codex.sessions.readable) {
+    return {
+      code: "CODEX_SESSIONS_UNREADABLE",
+      action: "Check CODEX_SESSIONS_DIR and Codex session log permissions."
+    };
+  }
+  if (state.stale) {
+    return {
+      code: "STATE_STALE",
+      action: "Check whether Codex is still running and producing session events."
+    };
+  }
+  if (network.public.reachable === false && network.lan.reachable === true) {
+    return {
+      code: "PUBLIC_UNREACHABLE_LAN_OK",
+      action: "Use LAN locally and check the public tunnel."
+    };
+  }
+  return {
+    code: "BRIDGE_OK",
+    action: "Bridge is ready."
   };
 }
 
@@ -2833,6 +3028,7 @@ function stopWatchDesktopStateFromSessionFile(file, mtimeMs, pickerItems = []) {
     text: lastReply,
     event: "completed",
     activity: "desktop-replied",
+    source: "codex-session-logs",
     lastUser,
     lastReply,
     observedAt: lastReplyAt || new Date(mtimeMs).toISOString(),
@@ -2929,6 +3125,7 @@ function stopWatchActiveDesktopTurnState({ meta, project, pickerItem, turn, last
     body: truncate(body, 180),
     text: turn.lastKind === "commentary" ? turn.lastBody : "",
     activity,
+    source: "codex-session-logs",
     lastUser,
     lastReply,
     observedAt: turn.observedAt || turn.startedAt,

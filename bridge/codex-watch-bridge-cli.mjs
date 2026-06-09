@@ -87,14 +87,17 @@ async function doctorCommand(options) {
   const token = pairingToken(options);
   const rootResult = await requestJSON(`${baseURL}/`, timeoutMs);
   const stateResult = await requestJSON(withToken(`${baseURL}/codex-stopwatch/state`, token), timeoutMs);
+  const healthResult = await requestJSON(withToken(`${baseURL}/health`, token), timeoutMs);
 
   console.log("Codex Watch Bridge Doctor");
   console.log(`Base URL: ${baseURL}`);
   printCheck("Bridge root", rootResult);
   printCheck("State endpoint", stateResult);
+  printCheck("Health endpoint", healthResult);
+  printHealthSummary(healthResult.json);
   console.log("");
 
-  if (rootResult.ok && stateResult.ok) {
+  if (rootResult.ok && stateResult.ok && healthResult.ok) {
     console.log("Result: OK");
     console.log(`Use this in the Watch app: ${watchURLForPort(port)}${token ? "?token=<pairing-token>" : ""}`);
     return;
@@ -146,14 +149,45 @@ function printCheck(label, result) {
   console.log(`FAIL ${label}: ${result.error || `HTTP ${result.statusCode}`}`);
 }
 
+function printHealthSummary(health) {
+  if (!health || typeof health !== "object") {
+    return;
+  }
+  if (health.diagnosis?.code) {
+    console.log(`Diagnosis: ${health.diagnosis.code}`);
+  }
+  if (health.diagnosis?.action) {
+    console.log(`Action: ${health.diagnosis.action}`);
+  }
+  if (health.state && typeof health.state.ageSeconds === "number") {
+    const stale = health.state.stale ? "stale" : "fresh";
+    console.log(`State freshness: ${stale}, ${health.state.ageSeconds}s old`);
+  }
+  if (health.codex?.appServer && typeof health.codex.appServer.ready === "boolean") {
+    console.log(`Codex app-server: ${health.codex.appServer.ready ? "ready" : "not ready"}`);
+  }
+  if (health.codex?.sessions && typeof health.codex.sessions.readable === "boolean") {
+    console.log(`Codex sessions: ${health.codex.sessions.readable ? "readable" : "unreadable"}`);
+  }
+}
+
 function requestJSON(url, timeoutMs) {
   return new Promise(resolve => {
     const request = http.get(url, { timeout: timeoutMs }, response => {
-      response.resume();
+      const chunks = [];
+      response.on("data", chunk => chunks.push(chunk));
       response.on("end", () => {
+        let json = null;
+        const body = Buffer.concat(chunks).toString("utf8");
+        if (body.trim()) {
+          try {
+            json = JSON.parse(body);
+          } catch {}
+        }
         resolve({
           ok: response.statusCode >= 200 && response.statusCode < 300,
-          statusCode: response.statusCode
+          statusCode: response.statusCode,
+          json
         });
       });
     });

@@ -49,6 +49,27 @@ describe("Codex Watch bridge CLI", () => {
         response.end(JSON.stringify({ ok: true }));
         return;
       }
+      if (requestURL.pathname === "/health" && requestURL.searchParams.get("token") === "secret-token") {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({
+          ok: true,
+          type: "bridge-health",
+          version: 2,
+          diagnosis: {
+            code: "BRIDGE_OK",
+            action: "Bridge is ready."
+          },
+          state: {
+            stale: false,
+            ageSeconds: 1
+          },
+          codex: {
+            appServer: { ready: true },
+            sessions: { readable: true }
+          }
+        }));
+        return;
+      }
       response.writeHead(401, { "content-type": "application/json" });
       response.end(JSON.stringify({ ok: false }));
     });
@@ -70,7 +91,11 @@ describe("Codex Watch bridge CLI", () => {
       });
 
       assert.match(stdout, /Result: OK/);
+      assert.match(stdout, /PASS Health endpoint: HTTP 200/);
+      assert.match(stdout, /Diagnosis: BRIDGE_OK/);
+      assert.match(stdout, /Action: Bridge is ready\./);
       assert.equal(seen.some(url => url.pathname === "/codex-stopwatch/state" && url.searchParams.get("token") === "secret-token"), true);
+      assert.equal(seen.some(url => url.pathname === "/health" && url.searchParams.get("token") === "secret-token"), true);
     } finally {
       await new Promise(resolve => server.close(resolve));
     }

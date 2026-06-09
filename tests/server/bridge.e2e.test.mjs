@@ -553,6 +553,9 @@ describe("Codex Watch bridge E2E", { concurrency: false }, () => {
     assert.equal(snapshot.body, "桌面回复第一行。\n桌面回复第二行。\n桌面回复第三行。");
     assert.equal(snapshot.text, "桌面回复第一行。\n桌面回复第二行。\n桌面回复第三行。");
     assert.equal(snapshot.recent.reply, "桌面回复第一行。\n桌面回复第二行。\n桌面回复第三行。");
+    assert.equal(typeof snapshot.stateFreshness.ageSeconds, "number");
+    assert.equal(snapshot.stateFreshness.source, "codex-session-logs");
+    assert.equal(snapshot.stateFreshness.stale, false);
   });
 
   test("HTTP poll returns desktop Codex session state without waiting for full StopWatch refresh", async () => {
@@ -1010,9 +1013,20 @@ describe("Codex Watch bridge E2E", { concurrency: false }, () => {
 
     assert.equal(health.ok, true);
     assert.equal(health.type, "bridge-health");
+    assert.equal(health.version, 2);
     assert.equal(health.bridge.linked, true);
     assert.equal(health.bridge.tokenRequired, false);
     assert.equal(typeof health.bridge.port, "number");
+    assert.equal(typeof health.bridge.uptimeSeconds, "number");
+    assert.equal(health.auth.required, false);
+    assert.equal(health.auth.accepted, true);
+    assert.equal(typeof health.codex.appServer.ready, "boolean");
+    assert.equal(typeof health.codex.sessions.readable, "boolean");
+    assert.equal(typeof health.clients.lastPollAt === "string" || health.clients.lastPollAt === null, true);
+    assert.equal(typeof health.state.ageSeconds, "number");
+    assert.equal(typeof health.state.stale, "boolean");
+    assert.equal(typeof health.diagnosis.code, "string");
+    assert.equal(typeof health.diagnosis.action, "string");
     assert.equal(health.endpoints.state, "/codex-stopwatch/state");
     assert.equal(health.endpoints.conversation, "/codex-stopwatch/conversation");
   });
