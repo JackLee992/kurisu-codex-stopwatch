@@ -3045,33 +3045,54 @@ async function codexUsageSnapshot(stateMessage = {}) {
       if (now - cachedStopWatchUsage.createdAtMs < cacheMs) {
         return cachedStopWatchUsage.value;
       }
-      if (!stopWatchUsageRefreshPromise) {
-        stopWatchUsageRefreshPromise = buildCodexUsageSnapshotValue(stateMessage, empty)
-          .then(value => {
-            cachedStopWatchUsage = { key: cacheKey, createdAtMs: Date.now(), value };
-            return value;
-          })
-          .catch(error => {
-            warnBridge("failed to refresh StopWatch usage snapshot", error);
-            return cachedStopWatchUsage?.value || empty;
-          })
-          .finally(() => {
-            stopWatchUsageRefreshPromise = null;
-          });
-      }
-      return await stopWatchUsageRefreshPromise;
+      refreshStopWatchUsageInBackground(stateMessage, empty, cacheKey);
+      return cachedStopWatchUsage.value;
     }
 
-    const value = await buildCodexUsageSnapshotValue(stateMessage, empty);
-    cachedStopWatchUsage = { key: cacheKey, createdAtMs: now, value };
-    return value;
+    const refreshPromise = refreshStopWatchUsageInBackground(stateMessage, empty, cacheKey);
+    const value = await Promise.race([
+      refreshPromise,
+      sleep(stopWatchUsageColdTimeoutMs()).then(() => null)
+    ]);
+    return value || empty;
   } catch (error) {
     warnBridge("failed to build StopWatch usage snapshot", error);
     return empty;
   }
 }
 
+function refreshStopWatchUsageInBackground(stateMessage, empty, cacheKey) {
+  if (stopWatchUsageRefreshPromise?.key === cacheKey) {
+    return stopWatchUsageRefreshPromise.promise;
+  }
+
+  const promise = buildCodexUsageSnapshotValue(stateMessage, empty)
+    .then(value => {
+      cachedStopWatchUsage = { key: cacheKey, createdAtMs: Date.now(), value };
+      return value;
+    })
+    .catch(error => {
+      warnBridge("failed to refresh StopWatch usage snapshot", error);
+      return cachedStopWatchUsage?.key === cacheKey ? cachedStopWatchUsage.value : empty;
+    })
+    .finally(() => {
+      if (stopWatchUsageRefreshPromise?.promise === promise) {
+        stopWatchUsageRefreshPromise = null;
+      }
+    });
+  stopWatchUsageRefreshPromise = { key: cacheKey, promise };
+  return promise;
+}
+
+function stopWatchUsageColdTimeoutMs() {
+  return positiveEnvNumber("CODEX_STOPWATCH_USAGE_COLD_TIMEOUT_MS", 900);
+}
+
 async function buildCodexUsageSnapshotValue(stateMessage, empty) {
+  const buildDelayMs = positiveEnvNumber("CODEX_STOPWATCH_USAGE_BUILD_DELAY_MS", 0);
+  if (buildDelayMs > 0) {
+    await sleep(buildDelayMs);
+  }
   const quota = await codexRateLimitSnapshot();
   const allFiles = findSessionFilesInRoots(currentCodexSessionRoots())
     .map(file => ({ file, mtimeMs: fs.statSync(file).mtimeMs }))

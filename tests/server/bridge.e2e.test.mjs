@@ -790,7 +790,7 @@ describe("Codex Watch bridge E2E", { concurrency: false }, () => {
     assert.equal(snapshot.usage.secondaryRemainingPercent, 58);
   });
 
-  test("StopWatch endpoint refreshes expired usage cache before responding", async () => {
+  test("StopWatch endpoint refreshes expired usage cache in the background", async () => {
     process.env.CODEX_STOPWATCH_TODAY = "2026-05-24";
     process.env.CODEX_STOPWATCH_USAGE_CACHE_MS = "0";
     await appendTokenUsageFixture("thread-e2e-1", {
@@ -821,11 +821,63 @@ describe("Codex Watch bridge E2E", { concurrency: false }, () => {
     });
 
     snapshot = await getStopWatchState();
+    assert.equal(snapshot.usage.primaryUsedPercent, 41);
+
+    await sleep(25);
+    process.env.CODEX_STOPWATCH_USAGE_CACHE_MS = "30000";
+    snapshot = await getStopWatchState();
 
     assert.equal(snapshot.usage.primaryUsedPercent, 52);
     assert.equal(snapshot.usage.secondaryUsedPercent, 11);
     assert.equal(snapshot.usage.primaryRemainingPercent, 48);
     assert.equal(snapshot.usage.secondaryRemainingPercent, 89);
+  });
+
+  test("StopWatch endpoint returns cached usage while slow refresh runs in background", async () => {
+    process.env.CODEX_STOPWATCH_TODAY = "2026-05-24";
+    await appendTokenUsageFixture("thread-e2e-1", {
+      inputTokens: 120,
+      cachedInputTokens: 80,
+      outputTokens: 30,
+      reasoningOutputTokens: 10,
+      totalTokens: 160,
+      sessionTotalTokens: 3200,
+      primaryUsedPercent: 41,
+      secondaryUsedPercent: 7,
+      timestamp: "2026-05-24T08:30:00.000Z"
+    });
+
+    let snapshot = await getStopWatchState();
+    assert.equal(snapshot.usage.primaryUsedPercent, 41);
+
+    process.env.CODEX_STOPWATCH_USAGE_CACHE_MS = "0";
+    process.env.CODEX_STOPWATCH_USAGE_COLD_TIMEOUT_MS = "5";
+    process.env.CODEX_STOPWATCH_USAGE_BUILD_DELAY_MS = "80";
+    await appendTokenUsageFixture("thread-e2e-1", {
+      inputTokens: 160,
+      cachedInputTokens: 80,
+      outputTokens: 40,
+      reasoningOutputTokens: 10,
+      totalTokens: 210,
+      sessionTotalTokens: 3410,
+      primaryUsedPercent: 52,
+      secondaryUsedPercent: 11,
+      timestamp: "2026-05-24T08:34:00.000Z"
+    });
+
+    const startedAt = Date.now();
+    snapshot = await getStopWatchState();
+
+    assert.ok(Date.now() - startedAt < 60);
+    assert.equal(snapshot.usage.primaryUsedPercent, 41);
+
+    await sleep(120);
+    process.env.CODEX_STOPWATCH_USAGE_CACHE_MS = "30000";
+    process.env.CODEX_STOPWATCH_USAGE_BUILD_DELAY_MS = "0";
+    snapshot = await getStopWatchState();
+
+    assert.equal(snapshot.usage.primaryUsedPercent, 52);
+    assert.equal(snapshot.usage.secondaryUsedPercent, 11);
   });
 
   test("StopWatch endpoint marks high quota windows for compact alerts", async () => {
@@ -1145,6 +1197,12 @@ async function pollUntil(client, predicate, timeoutMs = 3000) {
   }
 
   assert.fail(`Timed out waiting for messages. Saw: ${JSON.stringify(allMessages)}`);
+}
+
+function sleep(ms) {
+  return new Promise(resolve => {
+    setTimeout(resolve, ms);
+  });
 }
 
 function pcmFloatChunk() {
