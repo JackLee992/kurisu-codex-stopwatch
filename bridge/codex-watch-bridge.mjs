@@ -137,6 +137,7 @@ export function createBridgeServer() {
         return;
       }
       const client = getHTTPClient(clientIDFromURL(requestURL), request.socket);
+      enqueueLatestStopWatchStateForPoll(client);
       jsonResponse(response, 200, { ok: true, messages: drainQueuedMessages(client) });
       return;
     }
@@ -3886,6 +3887,40 @@ function drainQueuedMessages(client) {
     return [];
   }
   return client.queue.splice(0, client.queue.length);
+}
+
+function enqueueLatestStopWatchStateForPoll(client) {
+  if (!client || !Array.isArray(client.queue)) {
+    return;
+  }
+  syncStopWatchDesktopStateFromSessions();
+  const stateMessage = stopWatchStateMessage();
+  if (!stateMessage || stateMessage.type !== "state") {
+    return;
+  }
+
+  const signature = pollStateSignature(stateMessage);
+  if (!signature || client.lastPolledStateSignature === signature) {
+    return;
+  }
+
+  client.lastPolledStateSignature = signature;
+  client.queue.push({
+    ...stateMessage,
+    pet: client.pet
+  });
+}
+
+function pollStateSignature(message = {}) {
+  return [
+    normalizeStatus(message.state),
+    message.title || "",
+    message.body || "",
+    message.text || "",
+    message.observedAt || "",
+    message.project || "",
+    message.chat || ""
+  ].join("\u001f");
 }
 
 function readRequestBody(request) {

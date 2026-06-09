@@ -555,6 +555,37 @@ describe("Codex Watch bridge E2E", { concurrency: false }, () => {
     assert.equal(snapshot.recent.reply, "桌面回复第一行。\n桌面回复第二行。\n桌面回复第三行。");
   });
 
+  test("HTTP poll returns desktop Codex session state without waiting for full StopWatch refresh", async () => {
+    await appendSessionEventFixture("thread-e2e-1", {
+      timestamp: "2026-05-24T15:02:00.000Z",
+      type: "event_msg",
+      payload: {
+        type: "task_started",
+        turn_id: "desktop-turn-2"
+      }
+    });
+    await appendSessionEventFixture("thread-e2e-1", {
+      timestamp: "2026-05-24T15:02:01.000Z",
+      type: "response_item",
+      payload: {
+        type: "function_call",
+        name: "exec_command"
+      }
+    });
+
+    const firstPoll = await poll("state-sync-watch");
+    const stateMessage = firstPoll.messages.find(message => message.type === "state");
+
+    assert.equal(stateMessage?.state, "running");
+    assert.equal(stateMessage?.title, "Running command");
+    assert.equal(stateMessage?.chat, "thread-e2e-1");
+    assert.equal("items" in stateMessage, false);
+    assert.equal("capabilities" in stateMessage, false);
+
+    const secondPoll = await poll("state-sync-watch");
+    assert.equal(secondPoll.messages.some(message => message.title === "Running command"), false);
+  });
+
   test("StopWatch endpoint returns compact state and best-effort usage", async () => {
     process.env.CODEX_STOPWATCH_TODAY = "2026-05-24";
     await appendTokenUsageFixture("thread-e2e-1", {
