@@ -22,6 +22,9 @@ async function main(argv = process.argv.slice(2)) {
     case "urls":
       urlsCommand(options);
       break;
+    case "pair":
+      await pairCommand(options);
+      break;
     case "doctor":
       await doctorCommand(options);
       break;
@@ -48,8 +51,12 @@ function parseArgs(argv) {
     }
 
     const [rawKey, inlineValue] = arg.slice(2).split("=", 2);
-    const value = inlineValue ?? rest[index + 1];
-    if (inlineValue === undefined) {
+    const nextValue = rest[index + 1];
+    const hasSeparateValue = inlineValue === undefined
+      && typeof nextValue === "string"
+      && !nextValue.startsWith("--");
+    const value = inlineValue ?? (hasSeparateValue ? nextValue : true);
+    if (hasSeparateValue) {
       index += 1;
     }
     options[rawKey] = value;
@@ -78,6 +85,48 @@ function urlsCommand(options) {
   const port = numberOption(options.port, DEFAULT_PORT);
   const token = pairingToken(options);
   printURLGuide({ host, port, token, title: "Codex Watch Bridge URLs" });
+}
+
+async function pairCommand(options) {
+  const port = numberOption(options.port, DEFAULT_PORT);
+  const mode = stringOption(options.mode, "directBridge");
+  const active = stringOption(options.active, "lan");
+  const token = pairingToken(options);
+  const lanURL = normalizeBaseURL(stringOption(options["lan-url"], watchURLForPort(port)));
+  const publicURL = normalizeBaseURL(stringOption(options["public-url"], process.env.CODEX_WATCH_PUBLIC_URL || ""));
+  const payload = bridgePairingPayload({
+    mode,
+    active,
+    lanURL,
+    publicURL,
+    token
+  });
+  const qrMode = stringOption(options.qr, "terminal");
+
+  console.log("Codex Watch Bridge Pairing");
+  console.log(`Mode: ${mode}`);
+  console.log(`Active endpoint: ${active}`);
+  console.log(`LAN URL: ${lanURL}`);
+  if (publicURL) {
+    console.log(`Public Tunnel URL: ${publicURL}`);
+  }
+  console.log(`Token: ${token ? "<pairing-token>" : "not configured"}`);
+  console.log("");
+  console.log("Pairing QR");
+  if (qrMode === "none") {
+    console.log("QR output disabled.");
+  } else {
+    await printTerminalQRCode(payload);
+  }
+  console.log("");
+  console.log("iPhone setup:");
+  console.log("  1. Open Codex Buddy on iPhone.");
+  console.log("  2. Open Bridge settings.");
+  console.log("  3. Scan this QR code or paste the pairing payload.");
+  if (options["show-payload"] === "true" || options["show-payload"] === true) {
+    console.log("");
+    console.log(`Pairing payload: ${payload}`);
+  }
 }
 
 async function doctorCommand(options) {
@@ -168,6 +217,35 @@ function printHealthSummary(health) {
   }
   if (health.codex?.sessions && typeof health.codex.sessions.readable === "boolean") {
     console.log(`Codex sessions: ${health.codex.sessions.readable ? "readable" : "unreadable"}`);
+  }
+}
+
+function bridgePairingPayload({ mode, active, lanURL, publicURL, token }) {
+  const url = new URL("codex-buddy://bridge/pair");
+  url.searchParams.set("v", "1");
+  url.searchParams.set("mode", mode);
+  url.searchParams.set("active", active);
+  if (lanURL) {
+    url.searchParams.set("lan", lanURL);
+  }
+  if (publicURL) {
+    url.searchParams.set("public", publicURL);
+  }
+  if (token) {
+    url.searchParams.set("token", token);
+  }
+  return url.toString();
+}
+
+async function printTerminalQRCode(payload) {
+  try {
+    const qrcode = await import("qrcode-terminal");
+    qrcode.default.generate(payload, { small: true }, code => {
+      console.log(code);
+    });
+  } catch (error) {
+    console.log("QR generator unavailable.");
+    console.log(`Install dependencies with npm install. ${error.message}`);
   }
 }
 
@@ -273,11 +351,13 @@ function printHelp() {
 Usage:
   codex-watch-bridge start [--host ::] [--port 17843] [--token-file .codex-buddy-watch/pairing-token]
   codex-watch-bridge urls [--host ::] [--port 17843] [--token-file .codex-buddy-watch/pairing-token]
+  codex-watch-bridge pair [--port 17843] [--lan-url http://mac-ip:17843] [--public-url https://example.ts.net] [--token-file .codex-buddy-watch/pairing-token]
   codex-watch-bridge doctor [--base-url http://127.0.0.1:17843] [--timeout-ms 15000] [--token-file .codex-buddy-watch/pairing-token]
 
 Commands:
   start   Start the bridge and print Watch connection instructions.
   urls    Print LAN, hostname, simulator, and self-check URLs.
+  pair    Print a QR pairing payload for the iPhone app.
   doctor  Check whether the bridge is reachable and ready.
 `);
 }

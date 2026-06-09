@@ -9,7 +9,11 @@
     "bridge": "node bridge/codex-watch-bridge-cli.mjs start",
     "bridge:doctor": "node bridge/codex-watch-bridge-cli.mjs doctor",
     "bridge:urls": "node bridge/codex-watch-bridge-cli.mjs urls",
+    "bridge:pair": "node bridge/codex-watch-bridge-cli.mjs pair",
     "test": "node --test tests/server/*.test.mjs",
     "check": "node --check bridge/codex-watch-bridge.mjs && node --check bridge/codex-watch-bridge-cli.mjs && node --test tests/server/*.test.mjs"
+  },
+  "dependencies": {
+    "qrcode-terminal": "^0.12.0"
   }
 }

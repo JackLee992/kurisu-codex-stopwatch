@@ -17,6 +17,7 @@ describe("Codex Watch bridge CLI", () => {
     assert.match(manifest.scripts?.bridge || "", /codex-watch-bridge-cli\.mjs start/);
     assert.match(manifest.scripts?.["bridge:doctor"] || "", /codex-watch-bridge-cli\.mjs doctor/);
     assert.match(manifest.scripts?.["bridge:urls"] || "", /codex-watch-bridge-cli\.mjs urls/);
+    assert.match(manifest.scripts?.["bridge:pair"] || "", /codex-watch-bridge-cli\.mjs pair/);
   });
 
   test("urls prints watch setup URLs and self-check commands", async () => {
@@ -32,6 +33,55 @@ describe("Codex Watch bridge CLI", () => {
     assert.match(stdout, /\/codex-stopwatch\/state/);
     assert.match(stdout, /codex-watch-bridge doctor/);
     assert.doesNotMatch(stdout, /127\.0\.0\.1:17843\s+Use this on Apple Watch/);
+  });
+
+  test("pair prints a codex buddy pairing payload for iPhone import", async () => {
+    const { stdout } = await execFileAsync(process.execPath, [
+      "bridge/codex-watch-bridge-cli.mjs",
+      "pair",
+      "--port",
+      "12345",
+      "--lan-url",
+      "http://10.0.0.5:12345",
+      "--public-url",
+      "https://codex-buddy.example.ts.net",
+      "--token",
+      "secret-token",
+      "--qr",
+      "none",
+      "--show-payload"
+    ], { cwd: root });
+
+    const payload = stdout.match(/Pairing payload: (codex-buddy:\/\/bridge\/pair\\?[^\n]+)/)?.[1];
+    assert.ok(payload);
+
+    const url = new URL(payload);
+    assert.equal(url.protocol, "codex-buddy:");
+    assert.equal(url.host, "bridge");
+    assert.equal(url.pathname, "/pair");
+    assert.equal(url.searchParams.get("v"), "1");
+    assert.equal(url.searchParams.get("mode"), "directBridge");
+    assert.equal(url.searchParams.get("active"), "lan");
+    assert.equal(url.searchParams.get("lan"), "http://10.0.0.5:12345");
+    assert.equal(url.searchParams.get("public"), "https://codex-buddy.example.ts.net");
+    assert.equal(url.searchParams.get("token"), "secret-token");
+  });
+
+  test("pair hides the token unless payload output is explicitly requested", async () => {
+    const { stdout } = await execFileAsync(process.execPath, [
+      "bridge/codex-watch-bridge-cli.mjs",
+      "pair",
+      "--token",
+      "secret-token",
+      "--qr",
+      "none"
+    ], { cwd: root });
+
+    assert.match(stdout, /Codex Watch Bridge Pairing/);
+    assert.match(stdout, /Pairing QR/);
+    assert.match(stdout, /Token: <pairing-token>/);
+    assert.doesNotMatch(stdout, /secret-token/);
+    assert.doesNotMatch(stdout, /Pairing payload: codex-buddy/);
   });
 
   test("doctor appends pairing token from environment for state checks", async () => {
